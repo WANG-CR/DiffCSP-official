@@ -32,7 +32,8 @@ from functools import partial
 import faulthandler
 faulthandler.enable()
 
-
+from pathlib import Path
+import os 
 
 # Tensor of unit cells. Assumes 27 cells in -1, 0, 1 offsets in the x and y dimensions
 # Note that differing from OCP, we have 27 offsets here because we are in 3D
@@ -1187,6 +1188,25 @@ def process_one(row, niggli, primitive, graph_method, prop_list, use_space_group
 
     return result_dict
 
+def process2D_one(cif, niggli, primitive, graph_method, use_space_group = False, tol=0.01):
+    crystal_str = Path(cif).read_text()
+    crystal = build_crystal(
+        crystal_str, niggli=niggli, primitive=primitive)
+    result_dict = {}
+    if use_space_group:
+        crystal, sym_info = get_symmetry_info(crystal, tol = tol)
+        result_dict.update(sym_info)
+    else:
+        result_dict['spacegroup'] = 1
+    graph_arrays = build_crystal_graph(crystal, graph_method)
+    result_dict.update({
+        'id': os.path.basename(cif).split('.')[0],
+        'cif': crystal_str,
+        'graph_arrays': graph_arrays
+    })
+
+    return result_dict
+
 
 def preprocess(input_file, num_workers, niggli, primitive, graph_method,
                prop_list, use_space_group = False, tol=0.01):
@@ -1206,6 +1226,28 @@ def preprocess(input_file, num_workers, niggli, primitive, graph_method,
     mpid_to_results = {result['mp_id']: result for result in unordered_results}
     ordered_results = [mpid_to_results[df.iloc[idx]['material_id']]
                        for idx in range(len(df))]
+
+    return ordered_results
+
+def preprocess2D(file_paths, num_workers, niggli, primitive, graph_method,
+                use_space_group = False, tol=0.01):
+    """
+    Preprocess CIF files into graph data.
+    """
+    
+    unordered_results = p_umap(
+        process2D_one,
+        file_paths,
+        [niggli] * len(file_paths),
+        [primitive] * len(file_paths),
+        [graph_method] * len(file_paths),
+        [use_space_group] * len(file_paths),
+        [tol] * len(file_paths),
+        num_cpus=num_workers)
+
+    basenames = [os.path.basename(file_path).split('.')[0] for file_path in file_paths]
+    mpid_to_results = {result['id']: result for result in unordered_results}
+    ordered_results = [mpid_to_results[basenames[idx]] for idx in range(len(file_paths))]
 
     return ordered_results
 
