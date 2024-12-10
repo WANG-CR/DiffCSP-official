@@ -5,15 +5,15 @@ import glob
 import pandas as pd
 from omegaconf import ValueNode
 from torch.utils.data import Dataset
+from tqdm import tqdm
 import os
 from torch_geometric.data import Data
 import pickle
 import numpy as np
-
+import pdb
 from diffcsp.common.utils import PROJECT_ROOT
 from diffcsp.common.data_utils import (
-    preprocess, preprocess2D, preprocess_tensors, add_scaled_lattice_prop)
-
+    preprocess, preprocess2D, preprocess_tensors, add_scaled_lattice_prop, load_hdf5_file)
 
 class CrystDataset(Dataset):
     def __init__(self, name: ValueNode, path: ValueNode,
@@ -186,6 +186,7 @@ class Cryst2DDataset(Dataset):
                  prop: ValueNode, niggli: ValueNode, primitive: ValueNode,
                  graph_method: ValueNode, preprocess_workers: ValueNode,
                  lattice_scale_method: ValueNode, save_path: ValueNode, tolerance: ValueNode, use_space_group: ValueNode, use_pos_index: ValueNode,
+                 load_hamiltonian: ValueNode, isFolder: ValueNode, 
                  **kwargs):
         super().__init__()
         self.path = path
@@ -199,14 +200,24 @@ class Cryst2DDataset(Dataset):
         self.use_space_group = use_space_group
         self.use_pos_index = use_pos_index
         self.tolerance = tolerance
+        self.load_hamiltonian = load_hamiltonian
 
         self.data_dir = os.path.join(path, stage)
         if not os.path.exists(self.data_dir):
             raise ValueError(f"Directory {self.data_dir} does not exist.")
 
-        self.file_paths = glob.glob(os.path.join(self.data_dir, "*.cif"))
-        if len(self.file_paths) == 0:
-            raise ValueError(f"No CIF files found in {self.data_dir}.")
+
+        if isFolder:
+            self.folders = glob.glob(os.path.join(self.data_dir, "*"))
+            self.file_paths = glob.glob(os.path.join(self.data_dir, "*", "*.cif"))
+            if len(self.folders) == 0:
+                raise ValueError(f"No folders found in {self.data_dir}.")
+            if len(self.file_paths) == 0:
+                raise ValueError(f"No CIF files found in {self.data_dir}.")
+        else:
+            self.file_paths = glob.glob(os.path.join(self.data_dir, "*.cif"))
+            if len(self.file_paths) == 0:
+                raise ValueError(f"No CIF files found in {self.data_dir}.")
 
         self.preprocess(save_path, preprocess_workers, prop)
 
@@ -215,6 +226,7 @@ class Cryst2DDataset(Dataset):
     def preprocess(self, save_path, preprocess_workers, prop):
         if os.path.exists(save_path):
             self.cached_data = torch.load(save_path)
+            # pdb.set_trace()
         else:
             cached_data = preprocess2D(
             self.file_paths,
@@ -224,18 +236,33 @@ class Cryst2DDataset(Dataset):
             graph_method=self.graph_method,
             use_space_group=self.use_space_group,
             tol=self.tolerance)
+            # torch.save(cached_data, save_path)
+            # self.cached_data = cached_data
+
+            if self.load_hamiltonian:
+                for data_dict in tqdm(cached_data):
+                    # data_dict['id']
+                    folder_name = os.path.join(self.data_dir, data_dict['id'])
+
+                    # folder_name = os.path.join(self.data_dir, "5")
+                    h5_file = os.path.join(folder_name, f"hamiltonians.h5")
+                    if os.path.exists(h5_file):
+                        data_dict['hamiltonian'] = [load_hdf5_file(h5_file)]
+                    else:
+                        raise FileNotFoundError(f"HDF5 file not found in folder {folder_name}")
+
             torch.save(cached_data, save_path)
             self.cached_data = cached_data
-
+        # pdb.set_trace()
     def __len__(self) -> int:
         return len(self.cached_data)
 
     def __getitem__(self, index):
         data_dict = self.cached_data[index]
-
+        
         (frac_coords, atom_types, lengths, angles, edge_indices,
          to_jimages, num_atoms) = data_dict['graph_arrays']
-
+        hamiltonian = data_dict['hamiltonian']
         # atom_coords are fractional coordinates
         # edge_index is incremented during batching
         # https://pytorch-geometric.readthedocs.io/en/latest/notes/batching.html
@@ -249,8 +276,18 @@ class Cryst2DDataset(Dataset):
             to_jimages=torch.LongTensor(to_jimages),
             num_atoms=num_atoms,
             num_bonds=edge_indices.shape[0],
-            num_nodes=num_atoms,  # special attribute used for batching in pytorch geometric
+            num_nodes=num_atoms, # special attribute used for batching in pytorch geometric
+            hamiltonian=hamiltonian,  
         )
+
+        # # Load Hamiltonian from HDF5 file in the same folder
+        # if self.load_hamiltonian:
+        #     folder_name = os.path.join(self.data_dir, data_dict['id'])
+        #     h5_file = os.path.join(folder_name, f"hamiltonians.h5")
+        #     if os.path.exists(h5_file):
+        #         data.hamiltonian = [load_hdf5_file(h5_file)]
+        #     else:
+        #         raise FileNotFoundError(f"HDF5 file not found in folder {folder_name}")
 
         if "graph_arrays_initial" in data_dict:
             (frac_coords_initial, atom_types_initial, lengths_initial, angles_initial, edge_indices_initial,
@@ -278,6 +315,8 @@ class Cryst2DDataset(Dataset):
                 pos_dic[atom] = pos_dic.get(atom, 0) + 1
                 indexes.append(pos_dic[atom] - 1)
             data.index = torch.LongTensor(indexes)
+
+        # pdb.set_trace()
         return data
 
     def __repr__(self) -> str:

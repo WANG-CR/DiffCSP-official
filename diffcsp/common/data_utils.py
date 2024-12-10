@@ -34,7 +34,8 @@ faulthandler.enable()
 
 from pathlib import Path
 import os 
-
+import json
+import h5py
 # Tensor of unit cells. Assumes 27 cells in -1, 0, 1 offsets in the x and y dimensions
 # Note that differing from OCP, we have 27 offsets here because we are in 3D
 OFFSET_LIST = [
@@ -639,6 +640,10 @@ def radius_graph_pbc(pos, lengths, angles, natoms, radius, max_num_neighbors_thr
     inv_min_dist_a3 = torch.norm(cross_a1a2 / cell_vol, p=2, dim=-1)
     min_dist_a3 = (1 / inv_min_dist_a3).reshape(-1,1)
     
+    # print("min_dist_a1:", min_dist_a1.min(dim=-1)[0])
+    # print("min_dist_a1:", min_dist_a1.min(dim=-1)[0])
+    # print("min_dist_a3:", min_dist_a3.min(dim=-1)[0])
+
     # Take the max over all images for uniformity. This is essentially padding.
     # Note that this can significantly increase the number of computed distances
     # if the required repetitions are very different between images
@@ -690,12 +695,13 @@ def radius_graph_pbc(pos, lengths, angles, natoms, radius, max_num_neighbors_thr
     # Remove pairs that are too far apart
     
     
-    radius_real = (min_dist.min(dim=-1)[0] + 0.01)#.clamp(max=radius)
-    
+    # radius_real = (min_dist.min(dim=-1)[0] + 0.01)#.clamp(max=radius)
+    radius_real = (min_dist.min(dim=-1)[0] + 0.01).clamp(max=radius)
     radius_real = torch.repeat_interleave(radius_real, num_atoms_per_image_sqr * num_cells)
 
-    # print(min_dist.min(dim=-1)[0])
-    
+    # print("min_dist:", min_dist.min(dim=-1)[0])
+    # print("min_dist:", min_dist)
+    # print("radius_real:", radius_real)
     # radius_real = radius
     
     mask_within_radius = torch.le(atom_distance_sqr, radius_real * radius_real)
@@ -710,6 +716,10 @@ def radius_graph_pbc(pos, lengths, angles, natoms, radius, max_num_neighbors_thr
     unit_cell = unit_cell.view(-1, 3)
     atom_distance_sqr = torch.masked_select(atom_distance_sqr, mask)
     
+    # print("mask_within_radius:", mask_within_radius)
+    # print("mask_not_same:", mask_not_same)
+    # print("final_mask:", mask)
+
     if max_num_neighbors_threshold is not None:
 
         mask_num_neighbors, num_neighbors_image = get_max_neighbors_mask(
@@ -1251,6 +1261,35 @@ def preprocess2D(file_paths, num_workers, niggli, primitive, graph_method,
 
     return ordered_results
 
+
+def load_hdf5_file(file_path, default_dtype=torch.float32):
+    """
+    Load an HDF5 file, process its keys and values, and return the data in a dictionary.
+
+    Args:
+        file_path (str): Path to the HDF5 file to read.
+        default_dtype (torch.dtype): Default PyTorch data type for the values.
+
+    Returns:
+        dict: A dictionary where the keys are tuples (transformed from JSON strings)
+              and the values are PyTorch tensors.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    read_terms = {}
+
+    with h5py.File(file_path, 'r') as fid:
+        for k, v in fid.items():
+            # Parse the key from JSON string to Python tuple
+            key = json.loads(k)
+            # Transform the key as specified
+            key = (key[0], key[1], key[2], key[3] - 1, key[4] - 1)
+
+            # Convert the HDF5 dataset to a PyTorch tensor
+            read_terms[key] = torch.tensor(v[...], dtype=default_dtype)
+
+    return read_terms
 
 def preprocess_tensors(crystal_array_list, niggli, primitive, graph_method):
     def process_one(batch_idx, crystal_array, niggli, primitive, graph_method):
